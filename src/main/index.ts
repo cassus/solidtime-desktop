@@ -15,6 +15,7 @@ import { registerVueDevTools } from './devtools'
 import { initializeIdleMonitor } from './idleMonitor'
 import { runMigrations } from './db/migrate'
 import { registerActivityPeriodListeners } from './activityPeriods'
+import { registerCalendarEventListeners } from './calendarEvents'
 import { registerSettingsListeners, getErrorReportingEnabledAtStartup } from './settings'
 import { initializeActivityTracker, stopActivityTracking } from './activityTracker'
 import { registerWindowActivitiesHandlers } from './windowActivities'
@@ -156,6 +157,7 @@ app.whenReady().then(async () => {
 
     // Register IPC handlers
     registerActivityPeriodListeners()
+    registerCalendarEventListeners()
     registerSettingsListeners()
     registerWindowActivitiesHandlers()
     registerAppIconHandlers()

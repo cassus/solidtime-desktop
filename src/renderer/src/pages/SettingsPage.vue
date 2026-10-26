@@ -85,6 +85,33 @@ const updatePreferenceChanged = computed(
 )
 const showGrantPermissionButton = ref(false)
 const hasPermission = ref(false)
+// External calendar overlay: the iCal URL is a secret, so the renderer only
+// sends it to the main process and never reads it back.
+const calendarIcalUrlSet = ref(false)
+const calendarIcalUrlInput = ref('')
+const calendarIcalUrlError = ref('')
+
+async function saveCalendarIcalUrl(url: string) {
+    calendarIcalUrlError.value = ''
+    let result: { success: boolean; error?: string } | undefined
+    try {
+        result = await window.electron.ipcRenderer.invoke('setCalendarIcalUrl', url)
+    } catch {
+        result = undefined
+    }
+    if (!result?.success) {
+        calendarIcalUrlError.value = result?.error ?? 'Could not save the calendar address'
+        return
+    }
+    calendarIcalUrlInput.value = ''
+    calendarIcalUrlSet.value = url.trim() !== ''
+    queryClient.invalidateQueries({ queryKey: ['externalCalendarEvents'] })
+}
+
+onMounted(async () => {
+    calendarIcalUrlSet.value = await window.electron.ipcRenderer.invoke('hasCalendarIcalUrl')
+})
+
 const activityTrackingSupported = ref(true)
 const activityTrackingUnsupportedReason = ref('')
 const showDeleteWindowActivitiesModal = ref(false)
@@ -482,6 +509,40 @@ watch(activityTrackingEnabled, (enabled) => {
                         <Checkbox v-model:checked="isTrayTimerActivated" name="tray_timer" />
                         <span class="ms-2 text-sm">Show Tray / Menu Bar Timer</span>
                     </label>
+                </div>
+            </div>
+
+            <div
+                class="bg-card-background rounded-lg border border-card-background-separator p-6 mb-6">
+                <div class="mb-4 text-lg font-medium">Calendar Overlay</div>
+                <div class="space-y-2">
+                    <div class="text-xs text-muted-foreground">
+                        Show events from an external calendar (read-only) in the calendar view.
+                        Click an event to create a time entry from it. For Google Calendar, use the
+                        "Secret address in iCal format" from the calendar's settings.
+                    </div>
+                    <div class="text-sm">
+                        {{ calendarIcalUrlSet ? 'A calendar address is set.' : 'No calendar set.' }}
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <input
+                            v-model="calendarIcalUrlInput"
+                            type="password"
+                            autocomplete="off"
+                            placeholder="https://calendar.google.com/calendar/ical/…/basic.ics"
+                            class="flex-1 px-2 py-1 text-sm bg-card-background border border-card-background-separator rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        <SecondaryButton
+                            :disabled="calendarIcalUrlInput.trim() === ''"
+                            @click="saveCalendarIcalUrl(calendarIcalUrlInput)">
+                            Save
+                        </SecondaryButton>
+                        <SecondaryButton v-if="calendarIcalUrlSet" @click="saveCalendarIcalUrl('')">
+                            Remove
+                        </SecondaryButton>
+                    </div>
+                    <p v-if="calendarIcalUrlError" class="text-xs text-red-500">
+                        {{ calendarIcalUrlError }}
+                    </p>
                 </div>
             </div>
 

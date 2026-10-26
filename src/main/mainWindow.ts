@@ -109,6 +109,41 @@ function openDevAuthWindow(url: string, mainWindow: BrowserWindow): void {
 
     authWindow.loadURL(url)
 
+    // Without a web session the authorize endpoint answers 401 with an empty body
+    // instead of redirecting to the login page, so log in first and come back.
+    // The login form posts via XHR and then uses pushState, so in-page navigations count too.
+    const authorizeUrl = new URL(url)
+    const loginFlowPaths = [
+        '/login',
+        '/register',
+        '/two-factor-challenge',
+        '/forgot-password',
+        '/reset-password',
+        '/email/verify',
+    ]
+    let loggingIn = false
+    let loginDetours = 0
+    const onNavigate = (navUrl: string, httpResponseCode?: number): void => {
+        const current = new URL(navUrl)
+        if (current.origin !== authorizeUrl.origin) return
+        if (current.pathname === authorizeUrl.pathname && httpResponseCode === 401) {
+            // Give up after a few rounds instead of looping between login and authorize
+            if (loginDetours >= 3) return
+            loginDetours++
+            loggingIn = true
+            authWindow.loadURL(authorizeUrl.origin + '/login')
+        } else if (loggingIn && !loginFlowPaths.some((p) => current.pathname.startsWith(p))) {
+            loggingIn = false
+            authWindow.loadURL(url)
+        }
+    }
+    authWindow.webContents.on('did-navigate', (_event, navUrl, httpResponseCode) =>
+        onNavigate(navUrl, httpResponseCode)
+    )
+    authWindow.webContents.on('did-navigate-in-page', (_event, navUrl, isMainFrame) => {
+        if (isMainFrame) onNavigate(navUrl)
+    })
+
     // Intercept navigations to the solidtime:// callback scheme
     authWindow.webContents.on('will-navigate', (_event, navUrl) => {
         if (navUrl.startsWith('solidtime://')) {

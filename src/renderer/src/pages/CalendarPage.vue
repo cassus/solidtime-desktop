@@ -22,6 +22,14 @@ import type {
     TimeEntryResponse,
 } from '@solidtime/api'
 import type { ActivityPeriod } from '@solidtime/ui'
+
+// Matches ExternalCalendarEvent in src/main/calendarEvents.ts and @solidtime/ui
+interface ExternalCalendarEvent {
+    id: string
+    title: string
+    start: string
+    end: string
+}
 import { useAppIcons } from '../utils/appIcons.ts'
 
 const { currentOrganizationId, currentMembership } = useMyMemberships()
@@ -130,6 +138,7 @@ onActivated(() => {
     queryClient.invalidateQueries({
         queryKey: ['timeEntries', currentOrganizationId.value, 'calendar'],
     })
+    queryClient.invalidateQueries({ queryKey: ['externalCalendarEvents'] })
 })
 
 async function createTimeEntry(entry: Omit<TimeEntry, 'id' | 'organization_id' | 'user_id'>) {
@@ -286,6 +295,34 @@ const { data: activityPeriodsData } = useQuery<ActivityPeriod[]>({
     },
 })
 
+// Read-only events from the external calendar feed (empty if no iCal address is set)
+const { data: externalEventsData } = useQuery<ExternalCalendarEvent[]>({
+    queryKey: computed(() => [
+        'externalCalendarEvents',
+        {
+            start: calendarStart.value?.toISOString(),
+            end: calendarEnd.value?.toISOString(),
+        },
+    ]),
+    enabled: enableCalendarQuery,
+    placeholderData: (previousData: ExternalCalendarEvent[] | undefined) => previousData,
+    queryFn: async () => {
+        if (!calendarStart.value || !calendarEnd.value) {
+            return []
+        }
+        const result = await window.electron.ipcRenderer.invoke(
+            'getCalendarEvents',
+            dayjs(calendarStart.value).utc().format(),
+            dayjs(calendarEnd.value).utc().format()
+        )
+        if (result && result.success) {
+            return result.data
+        }
+        console.error('Error fetching calendar events:', result?.error)
+        return []
+    },
+})
+
 const activityPeriods = computed<ActivityPeriod[]>(() => {
     return activityPeriodsData.value || []
 })
@@ -340,6 +377,7 @@ const activityPeriodsWithIcons = computed<ActivityPeriod[]>(() => {
                 :clients="clients"
                 :tags="tags"
                 :activityPeriods="activityPeriodsWithIcons"
+                :externalEvents="externalEventsData ?? []"
                 :loading="timeEntriesLoading"
                 :enableEstimatedTime="false"
                 :currency="currentMembership?.organization?.currency || 'USD'"

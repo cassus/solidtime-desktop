@@ -54,6 +54,7 @@
         "dbus-next": "^0.10.2",
         "drizzle-orm": "^0.45.2",
         "electron-updater": "^6.6.2",
+        "node-ical": "^0.27.3",
         "pinia": "^3.0.3",
         "vue-router": "^5.0.4"
     },

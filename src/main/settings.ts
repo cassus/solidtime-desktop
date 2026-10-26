@@ -54,6 +54,13 @@ const SETTING_KEYS = {
     AUTO_INSTALL_UPDATES_ENABLED: 'auto_install_updates_enabled',
 } as const
 
+// Settings that hold secrets: never returned by getSettings and never sent to Sentry
+export const SECRET_SETTING_KEYS = {
+    CALENDAR_ICAL_URL: 'calendar_ical_url',
+} as const
+
+const SECRET_KEYS: ReadonlySet<string> = new Set(Object.values(SECRET_SETTING_KEYS))
+
 /**
  * Reads the error reporting preference synchronously during application startup.
  * Sentry must be initialized before Electron's ready event, so the regular
@@ -76,7 +83,7 @@ export function getErrorReportingEnabledAtStartup(): boolean {
 /**
  * Gets a setting value from the database
  */
-async function getSetting(key: string): Promise<string | null> {
+export async function getSetting(key: string): Promise<string | null> {
     try {
         const result = await db.select().from(settings).where(eq(settings.key, key)).limit(1)
 
@@ -94,7 +101,7 @@ async function getSetting(key: string): Promise<string | null> {
 /**
  * Sets a setting value in the database
  */
-async function setSetting(key: string, value: string): Promise<void> {
+export async function setSetting(key: string, value: string): Promise<void> {
     try {
         const existing = await getSetting(key)
 
@@ -116,6 +123,16 @@ async function setSetting(key: string, value: string): Promise<void> {
             })
         }
     } catch (error) {
+        if (SECRET_KEYS.has(key)) {
+            // The DB error message includes the query params, i.e. the secret value
+            const errorName = error instanceof Error ? error.name : 'Unknown error'
+            console.error(`Failed to set setting: ${key}`, errorName)
+            Sentry.captureMessage('Failed to set setting', {
+                tags: { context: 'setSetting' },
+                extra: { key, errorName },
+            })
+            throw new Error(`Failed to set setting: ${key}`)
+        }
         console.error(`Failed to set setting: ${key}`, error)
         Sentry.captureException(error, {
             tags: { context: 'setSetting' },
