@@ -1,4 +1,7 @@
-import { ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain } from 'electron'
+import { createHash } from 'node:crypto'
+import { readFile, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import ical, { type CalendarResponse, type VEvent } from 'node-ical'
 import * as Sentry from '@sentry/electron/main'
 import { getSetting, setSetting, SECRET_SETTING_KEYS } from './settings'
@@ -18,30 +21,94 @@ type CalendarEventsResult =
     | { success: true; data: ExternalCalendarEvent[] }
     | { success: false; error: string }
 
-const CACHE_TTL_MS = 5 * 60 * 1000
+// Large feeds (Google: tens of MB) can take a minute to download. The last feed
+// is kept on disk and shown right away; a stale feed is refreshed in the background
+// and the renderer is told via 'calendarFeedStatus' when new data is ready.
+const REFRESH_AFTER_MS = 15 * 60 * 1000
 
-let cache: { url: string; fetchedAt: number; calendar: CalendarResponse } | null = null
+// The disk cache is keyed by a hash of the URL, so the URL itself is never written there
+const feedFile = (): string => join(app.getPath('userData'), 'calendar-feed.ics')
+const metaFile = (): string => join(app.getPath('userData'), 'calendar-feed.json')
+const hashUrl = (url: string): string => createHash('sha256').update(url).digest('hex')
+
+let cache: { urlHash: string; fetchedAt: number; calendar: CalendarResponse } | null = null
+let refreshing: Promise<void> | null = null
 
 async function getIcalUrl(): Promise<string> {
     return (await getSetting(SECRET_SETTING_KEYS.CALENDAR_ICAL_URL)) ?? ''
 }
 
-async function fetchCalendar(url: string, forceRefresh: boolean): Promise<CalendarResponse> {
-    if (
-        !forceRefresh &&
-        cache &&
-        cache.url === url &&
-        Date.now() - cache.fetchedAt < CACHE_TTL_MS
-    ) {
-        return cache.calendar
+function broadcastStatus(): void {
+    for (const window of BrowserWindow.getAllWindows()) {
+        window.webContents.send('calendarFeedStatus', { refreshing: refreshing !== null })
     }
-    const response = await fetch(url)
-    if (!response.ok) {
-        throw new Error(`Calendar feed request failed with HTTP ${response.status}`)
+}
+
+async function loadFromDisk(urlHash: string): Promise<void> {
+    try {
+        const meta = JSON.parse(await readFile(metaFile(), 'utf8'))
+        if (meta.urlHash !== urlHash) return
+        const calendar = ical.sync.parseICS(await readFile(feedFile(), 'utf8'))
+        cache = { urlHash, fetchedAt: meta.fetchedAt, calendar }
+    } catch {
+        // No usable disk cache yet
     }
-    const calendar = ical.sync.parseICS(await response.text())
-    cache = { url, fetchedAt: Date.now(), calendar }
-    return calendar
+}
+
+function refreshFeed(url: string): Promise<void> {
+    if (refreshing) return refreshing
+    refreshing = (async () => {
+        try {
+            const response = await fetch(url)
+            if (!response.ok) {
+                throw new Error(`Calendar feed request failed with HTTP ${response.status}`)
+            }
+            const body = await response.text()
+            const urlHash = hashUrl(url)
+            const fetchedAt = Date.now()
+            cache = { urlHash, fetchedAt, calendar: ical.sync.parseICS(body) }
+            await writeFile(feedFile(), body, { mode: 0o600 })
+            await writeFile(metaFile(), JSON.stringify({ urlHash, fetchedAt }), { mode: 0o600 })
+        } finally {
+            refreshing = null
+            broadcastStatus()
+        }
+    })()
+    broadcastStatus()
+    return refreshing
+}
+
+async function getCalendar(url: string, forceRefresh: boolean): Promise<CalendarResponse> {
+    const urlHash = hashUrl(url)
+    if (!cache || cache.urlHash !== urlHash) {
+        cache = null
+        await loadFromDisk(urlHash)
+    }
+    if (!cache || forceRefresh) {
+        // Nothing to show yet: wait for the download
+        await refreshFeed(url)
+    } else if (Date.now() - cache.fetchedAt > REFRESH_AFTER_MS) {
+        // Show the stale feed now, refresh in the background
+        refreshFeed(url).catch(reportError)
+    }
+    if (!cache) throw new Error('Calendar feed unavailable')
+    return cache.calendar
+}
+
+function reportError(error: unknown): void {
+    // The error message may contain the feed URL, so only report a generic error
+    const errorName = error instanceof Error ? error.name : 'Unknown error'
+    console.error('Failed to fetch calendar events:', errorName)
+    Sentry.captureMessage('Failed to fetch calendar events', {
+        tags: { context: 'getCalendarEvents' },
+        extra: { errorName },
+    })
+}
+
+async function clearCache(): Promise<void> {
+    cache = null
+    await rm(feedFile(), { force: true })
+    await rm(metaFile(), { force: true })
 }
 
 function summaryText(summary: unknown): string {
@@ -72,7 +139,7 @@ async function getCalendarEvents(
             return { success: true, data: [] }
         }
 
-        const calendar = await fetchCalendar(url, forceRefresh)
+        const calendar = await getCalendar(url, forceRefresh)
         const events: ExternalCalendarEvent[] = []
 
         for (const entry of Object.values(calendar)) {
@@ -106,13 +173,7 @@ async function getCalendarEvents(
         events.sort((a, b) => a.start.localeCompare(b.start))
         return { success: true, data: events }
     } catch (error) {
-        // The error message may contain the feed URL, so only report a generic error
-        const errorMessage = error instanceof Error ? error.name : 'Unknown error'
-        console.error('Failed to fetch calendar events:', errorMessage)
-        Sentry.captureMessage('Failed to fetch calendar events', {
-            tags: { context: 'getCalendarEvents' },
-            extra: { errorName: errorMessage },
-        })
+        reportError(error)
         return { success: false, error: 'Could not load the calendar feed' }
     }
 }
@@ -144,7 +205,14 @@ export function registerCalendarEventListeners(): void {
             // setSetting already reported a redacted error; don't rethrow it to IPC
             return { success: false, error: 'Could not save the calendar address' }
         }
-        cache = null
+        await clearCache()
         return { success: true }
     })
+
+    ipcMain.handle('getCalendarFeedStatus', () => ({ refreshing: refreshing !== null }))
+
+    // Warm the cache at startup so the calendar view rarely waits for the download
+    getIcalUrl()
+        .then((url) => (url ? getCalendar(url, false) : undefined))
+        .catch(reportError)
 }

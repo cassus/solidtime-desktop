@@ -18,7 +18,8 @@ const solidtimeDir = process.env.SOLIDTIME_DIR
     : undefined
 
 function getLocalPackageAliases(): { find: string | RegExp; replacement: string }[] {
-    if (!solidtimeDir || isProduction) return []
+    // Also honoured in production builds, so `build:local` bundles the local packages
+    if (!solidtimeDir) return []
 
     const uiSrc = resolve(solidtimeDir, 'resources/js/packages/ui/src/index.ts')
     const apiSrc = resolve(solidtimeDir, 'resources/js/packages/api/src/index.ts')

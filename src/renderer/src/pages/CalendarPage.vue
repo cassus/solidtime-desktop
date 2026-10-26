@@ -296,7 +296,9 @@ const { data: activityPeriodsData } = useQuery<ActivityPeriod[]>({
 })
 
 // Read-only events from the external calendar feed (empty if no iCal address is set)
-const { data: externalEventsData } = useQuery<ExternalCalendarEvent[]>({
+const { data: externalEventsData, isFetching: externalEventsFetching } = useQuery<
+    ExternalCalendarEvent[]
+>({
     queryKey: computed(() => [
         'externalCalendarEvents',
         {
@@ -322,6 +324,23 @@ const { data: externalEventsData } = useQuery<ExternalCalendarEvent[]>({
         return []
     },
 })
+
+// The main process refreshes large feeds in the background; show that, and
+// reload the events once the new feed is in.
+const externalFeedRefreshing = ref(false)
+window.electron.ipcRenderer
+    .invoke('getCalendarFeedStatus')
+    .then((status) => (externalFeedRefreshing.value = !!status?.refreshing))
+window.electron.ipcRenderer.on('calendarFeedStatus', (_event, status) => {
+    const wasRefreshing = externalFeedRefreshing.value
+    externalFeedRefreshing.value = !!status?.refreshing
+    if (wasRefreshing && !externalFeedRefreshing.value) {
+        queryClient.invalidateQueries({ queryKey: ['externalCalendarEvents'] })
+    }
+})
+const externalEventsLoading = computed(
+    () => externalEventsFetching.value || externalFeedRefreshing.value
+)
 
 const activityPeriods = computed<ActivityPeriod[]>(() => {
     return activityPeriodsData.value || []
@@ -362,11 +381,17 @@ const activityPeriodsWithIcons = computed<ActivityPeriod[]>(() => {
 </script>
 
 <template>
-    <div class="flex-1 h-full flex flex-col">
+    <div class="flex-1 h-full flex flex-col relative">
         <div v-if="!currentOrganizationLoaded" class="flex items-center justify-center h-full">
             <LoadingSpinner />
         </div>
         <template v-else>
+            <div
+                v-if="externalEventsLoading"
+                class="absolute bottom-3 right-4 z-50 flex items-center gap-2 rounded-md border border-card-background-separator bg-card-background px-3 py-1.5 text-xs text-muted-foreground shadow-card pointer-events-none">
+                <LoadingSpinner class="h-3.5 w-3.5" />
+                Loading calendar…
+            </div>
             <TimeEntryCalendar
                 :key="initialDate ?? 'calendar'"
                 class="flex-1"
